@@ -1,12 +1,8 @@
 package writer
 
-import "os"
-
-type fileName string
-
 type segmentFile struct {
-	name           fileName
+	name           string
 	startTimeStamp int64
 	endTimeStamp   int64
-	pointer        *os.File
+	path           string
 }

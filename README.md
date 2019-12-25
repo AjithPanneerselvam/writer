@@ -1,2 +1,2 @@
-# writers 
-Log Writer 
+# writer
+A write efficient log writer. 

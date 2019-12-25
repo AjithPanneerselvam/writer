@@ -1,43 +1,38 @@
 package writer
 
-const (
-	maxMemTableSize = 1024
-)
+import "os"
 
 type memTable struct {
-	//log            *bytes.Buffer
-	logs           []Message
+	logs           []Log
 	startTimeStamp int64
 	endTimeStamp   int64
+	size           int
 }
 
 // NewMemTable returns a new instance of memTable
 func NewMemTable() memTable {
 	return memTable{
-		//log: bytes.NewBuffer(make([]byte, maxMemTableSize)),
-		logs: make([]Message, 0),
+		logs: make([]Log, 0),
+		size: 0,
 	}
 }
 
-func (m *memTable) Append(message Message) error {
-	m.logs = append(m.logs, message)
+func (m *memTable) Append(log Log) error {
+	if len(m.logs) == 0 {
+		m.startTimeStamp = log.TimeStamp
+	}
+
+	m.logs = append(m.logs, log)
+	m.size += log.Size() + 1
+
 	return nil
 }
 
-/*func (m *memTable) Write(data []byte) (n int, err error) {
-	n, err = m.log.Write(data)
-	if err != nil {
-		return n, err
+// flush flushes the logs to disk
+func (m *memTable) flush(w *os.File) error {
+	for _, log := range m.logs {
+		w.Write(log.Bytes())
 	}
-	//fmt.Println("memTable msg len", len(data))
 
-	//err = m.log.WriteByte('\n')
-	//fmt.Println("error in writing a new line")
-
-	if m.startTimeStamp == 0 {
-		m.startTimeStamp = time.Now().UnixNano()
-	}
-	m.endTimeStamp = time.Now().UnixNano()
-
-	return n, err
-}*/
+	return nil
+}
