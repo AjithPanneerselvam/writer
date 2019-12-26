@@ -1,35 +1,41 @@
 package writer
 
-import "os"
+import (
+	"fmt"
+	"io"
+)
 
-type memTable struct {
+type memtable struct {
 	logs           []Log
 	startTimeStamp int64
 	endTimeStamp   int64
-	size           int
+	occupiedSize   int
+	totalSize      int
 }
 
-// NewMemTable returns a new instance of memTable
-func NewMemTable() memTable {
-	return memTable{
-		logs: make([]Log, 0),
-		size: 0,
+// NewMemTable returns a new instance of memtable
+func NewMemtable(totalSize int) memtable {
+	return memtable{
+		logs:         make([]Log, 0),
+		occupiedSize: 0,
+		totalSize:    totalSize,
 	}
 }
 
-func (m *memTable) Append(log Log) error {
+func (m *memtable) Append(log Log) error {
 	if len(m.logs) == 0 {
 		m.startTimeStamp = log.TimeStamp
+		fmt.Println("memtable TimeStamp", log.TimeStamp)
 	}
 
 	m.logs = append(m.logs, log)
-	m.size += log.Size() + 1
+	m.occupiedSize += log.Size() + 1
 
 	return nil
 }
 
 // flush flushes the logs to disk
-func (m *memTable) flush(w *os.File) error {
+func (m *memtable) flush(w io.Writer) error {
 	for _, log := range m.logs {
 		w.Write(log.Bytes())
 	}

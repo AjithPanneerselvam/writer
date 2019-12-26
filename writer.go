@@ -2,16 +2,13 @@ package writer
 
 import (
 	"bufio"
+	"container/list"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
 	"path"
-	"strconv"
-)
-
-const (
-	maxMemTableSize = 1024
+	"sync"
 )
 
 // Writer provides an interface to write logs to desired target store
@@ -24,29 +21,37 @@ type Writer interface {
 	Replay() error
 }
 
-// FileLog implements the log reader and writer interface
+// logWriter implements the log reader and writer interface
 type logWriter struct {
-	logDirectory        string
-	out                 io.Writer
-	fileIndex           fileIndex
-	memTable            memTable
-	flushMemTableOnSize int
-	segmentFiles        map[string]segmentFile
+	logDirectory     string
+	fileIndex        fileIndex
+	memtable         memtable
+	memtableSize     int
+	segmentFileSize  int
+	segmentFiles     map[string]*segmentFile
+	segmentFilesLock sync.RWMutex
+	flushMemtableCh  chan<- memtable
+	closeCh          chan struct{}
 }
 
-// NewLogWriter returns a new file writer
-func NewLogWriter(logDirectory string, out io.Writer) Writer {
-	return &logWriter{
-		logDirectory:        logDirectory,
-		out:                 out,
-		memTable:            NewMemTable(),
-		flushMemTableOnSize: maxMemTableSize,
-		segmentFiles:        make(map[string]segmentFile, 0),
+// New returns a new log writer
+func New(logDirectory string, memtableSize int, segmentFileSize int) Writer {
+	logWriter := &logWriter{
+		logDirectory:    logDirectory,
+		memtable:        NewMemtable(memtableSize),
+		memtableSize:    memtableSize,
+		segmentFileSize: segmentFileSize,
+		segmentFiles:    make(map[string]*segmentFile, 0),
+		closeCh:         make(chan struct{}),
 	}
+
+	logWriter.flushMemtableCh = logWriter.flushMemtables()
+
+	return logWriter
 }
 
-// Write writes the data to log file
-func (f *logWriter) Write(r io.Reader) (int, error) {
+// Write writes the data to memtable or segment file
+func (l *logWriter) Write(r io.Reader) (int, error) {
 	logMessage, err := ioutil.ReadAll(r)
 	if err != nil {
 		return 0, err
@@ -55,59 +60,99 @@ func (f *logWriter) Write(r io.Reader) (int, error) {
 	log := NewLog(logMessage)
 	logLength := log.Size()
 
-	if f.memTable.size+logLength > f.flushMemTableOnSize {
-		go f.flushMemTable()
-		f.memTable = NewMemTable()
+	if l.memtable.occupiedSize+logLength > l.memtableSize {
+		l.flushMemtableCh <- l.memtable
+		l.memtable = NewMemtable(l.memtableSize)
 	}
 
-	f.memTable.Append(*log)
+	l.memtable.Append(*log)
 
 	return log.Size(), nil
 }
 
-// Close closes the file writer by flushing the uncommitted logs if any
-func (f *logWriter) Close() error {
-	return f.flushMemTable()
+func (l *logWriter) flushMemtables() chan<- memtable {
+	// TODO: Handle the error instead of panicking
+
+	var flushMemtableCh = make(chan memtable)
+
+	go func() {
+		var flushQueue = list.New()
+		var stop bool
+
+	loop:
+		for {
+			select {
+			case memtable := <-flushMemtableCh:
+				flushQueue.PushBack(memtable)
+			case <-l.closeCh:
+				stop = true
+			default:
+				if flushQueue.Len() == 0 {
+					if stop {
+						break loop
+					}
+					continue
+				}
+
+				element := flushQueue.Front()
+				memtable, ok := element.Value.(memtable)
+				if !ok {
+					panic("invalid value")
+				}
+
+				segmentFile, err := NewSegmentFile(l.logDirectory, l.segmentFileSize, memtable.startTimeStamp)
+				if err != nil {
+					panic(err)
+				}
+
+				l.segmentFilesLock.Lock()
+				l.segmentFiles[segmentFile.name] = segmentFile
+				l.segmentFilesLock.Unlock()
+
+				segmentFileWriter := segmentFile.Writer()
+				if err != nil {
+					panic(err)
+				}
+
+				err = memtable.flush(segmentFileWriter)
+				if err != nil {
+					panic(err)
+				}
+
+				err = segmentFile.Close()
+				if err != nil {
+					panic(err)
+				}
+
+				flushQueue.Remove(flushQueue.Front())
+			}
+		}
+
+		l.closeCh <- struct{}{}
+	}()
+
+	return flushMemtableCh
 }
 
-func (l *logWriter) flushMemTable() error {
-	segmentFileName := strconv.FormatInt(l.memTable.startTimeStamp, 10)
-	segmentFilePath := path.Join(l.logDirectory, segmentFileName)
-
-	file, err := os.Create(segmentFilePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	err = l.memTable.flush(file)
-	if err != nil {
-		return err
-	}
-
-	segmentFile := segmentFile{
-		name:           segmentFileName,
-		startTimeStamp: l.memTable.startTimeStamp,
-		endTimeStamp:   l.memTable.endTimeStamp,
-		path:           segmentFilePath,
-	}
-	l.segmentFiles[segmentFileName] = segmentFile
-
+// Close closes the file writer by flushing the uncommitted logs if any
+func (l *logWriter) Close() error {
+	l.closeCh <- struct{}{}
+	<-l.closeCh
 	return nil
 }
 
 // Replay replays the logs from the given timestamp ...
-func (f *logWriter) Replay() error {
-	// TODO: Implementation incomplete
-	for segmentFileName, segmentFile := range f.segmentFiles {
-		fmt.Println("segmentFileName", segmentFileName)
+func (l *logWriter) Replay() error {
+	// TODO: Incomplete
 
-		f, err := os.Open(path.Join(f.logDirectory, string(segmentFile.name)))
+	l.segmentFilesLock.RLock()
+	for segmentFileName, _ := range l.segmentFiles {
+		f, err := os.Open(path.Join(l.logDirectory, segmentFileName))
 		if err != nil {
 			return err
 		}
-
 		defer f.Close()
+		fmt.Println("segmentFile", segmentFileName)
 
 		fileScanner := bufio.NewScanner(f)
 		fileScanner.Split(bufio.ScanLines)
@@ -116,6 +161,7 @@ func (f *logWriter) Replay() error {
 			fmt.Println(fileScanner.Text())
 		}
 	}
+	l.segmentFilesLock.RUnlock()
 
 	return nil
 }

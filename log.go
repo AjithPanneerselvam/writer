@@ -5,10 +5,6 @@ import (
 	"time"
 )
 
-const (
-	newLine = '\n'
-)
-
 // Message is an abstraction of log message
 type Log struct {
 	TimeStamp int64
@@ -21,9 +17,10 @@ func NewLog(msg []byte) *Log {
 	msg = append(msg, byte(10))
 
 	return &Log{
-		TimeStamp: time.Now().Unix(),
-		LogLevel:  "info",
-		Message:   msg,
+		TimeStamp: time.Now().UnixNano(),
+		// TODO: Handle to set this dynamically
+		LogLevel: "info",
+		Message:  msg,
 	}
 }
 

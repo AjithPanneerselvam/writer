@@ -14,9 +14,11 @@ func main() {
 		"stopping service",
 	}
 
-	w := writer.NewLogWriter("/Users/ajith/go/src/github.com/AjithPanneerselvam/writer/cmd/app/logs", nil)
-	for _, log := range logs {
-		w.Write(strings.NewReader(log))
+	w := writer.New("/Users/ajith/go/src/github.com/AjithPanneerselvam/writer/cmd/app/logs", 1024, 2048)
+	for i := 0; i < 50; i++ {
+		for _, log := range logs {
+			w.Write(strings.NewReader(log))
+		}
 	}
 
 	err := w.Close()
