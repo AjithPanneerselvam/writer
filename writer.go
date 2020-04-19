@@ -9,6 +9,11 @@ import (
 	"os"
 	"path"
 	"sync"
+
+	"github.com/AjithPanneerselvam/writer/log"
+	"github.com/AjithPanneerselvam/writer/memtable"
+	"github.com/AjithPanneerselvam/writer/segmentfile"
+	"github.com/pkg/errors"
 )
 
 // Writer provides an interface to write logs to desired target store
@@ -16,33 +21,48 @@ type Writer interface {
 	// Write reads from r and writes it to out
 	Write(r io.Reader) (n int, err error)
 
-	Close() error
+	//SetLogLevel sets the given logLevel
+	SetLogLevel(logLevel log.LogLevel)
 
 	Replay() error
+
+	// Close closes flushes the running memtable
+	// anc closes the writer
+	Close() error
 }
 
-// logWriter implements the log reader and writer interface
+// logWriter implements the Writer interface
 type logWriter struct {
-	logDirectory     string
-	fileIndex        fileIndex
-	memtable         memtable
-	memtableSize     int
-	segmentFileSize  int
-	segmentFiles     map[string]*segmentFile
+	logDirectory string
+	logLevel     log.LogLevel
+
+	fileIndex fileIndex
+
+	memtable     memtable.Memtable
+	memtableSize int
+
+	segmentFileSize int
+	segmentFiles    map[string]*segmentfile.SegmentFile
+
 	segmentFilesLock sync.RWMutex
-	flushMemtableCh  chan<- memtable
-	closeCh          chan struct{}
+	logLevelLock     sync.Mutex
+
+	flushMemtableCh chan<- memtable.Memtable
+	closeCh         chan struct{}
+	closeAckCh      chan struct{}
 }
 
-// New returns a new log writer
+// New returns a new instance of writer
 func New(logDirectory string, memtableSize int, segmentFileSize int) Writer {
 	logWriter := &logWriter{
 		logDirectory:    logDirectory,
-		memtable:        NewMemtable(memtableSize),
+		logLevel:        log.LogLevelInfo,
+		memtable:        memtable.New(memtableSize),
 		memtableSize:    memtableSize,
 		segmentFileSize: segmentFileSize,
-		segmentFiles:    make(map[string]*segmentFile, 0),
+		segmentFiles:    make(map[string]*segmentfile.SegmentFile, 0),
 		closeCh:         make(chan struct{}),
+		closeAckCh:      make(chan struct{}),
 	}
 
 	logWriter.flushMemtableCh = logWriter.flushMemtables()
@@ -50,19 +70,19 @@ func New(logDirectory string, memtableSize int, segmentFileSize int) Writer {
 	return logWriter
 }
 
-// Write writes the data to memtable or segment file
+// Write writes the data to memtable.
 func (l *logWriter) Write(r io.Reader) (int, error) {
 	logMessage, err := ioutil.ReadAll(r)
 	if err != nil {
 		return 0, err
 	}
 
-	log := NewLog(logMessage)
+	log := log.New(logMessage, l.logLevel)
 	logLength := log.Size()
 
-	if l.memtable.occupiedSize+logLength > l.memtableSize {
+	if l.memtable.OccupiedSize+logLength > l.memtableSize {
 		l.flushMemtableCh <- l.memtable
-		l.memtable = NewMemtable(l.memtableSize)
+		l.memtable = memtable.New(l.memtableSize)
 	}
 
 	l.memtable.Append(*log)
@@ -70,81 +90,96 @@ func (l *logWriter) Write(r io.Reader) (int, error) {
 	return log.Size(), nil
 }
 
-func (l *logWriter) flushMemtables() chan<- memtable {
-	// TODO: Handle the error instead of panicking
+// SetLogLevel sets the log level for the writer
+func (l *logWriter) SetLogLevel(logLevel log.LogLevel) {
+	l.logLevelLock.Lock()
+	l.logLevel = logLevel
+	l.logLevelLock.Unlock()
+}
 
-	var flushMemtableCh = make(chan memtable)
+func (l *logWriter) flushMemtables() chan<- memtable.Memtable {
+	var flushMemtableCh = make(chan memtable.Memtable)
 
 	go func() {
-		var flushQueue = list.New()
-		var stop bool
+		var memtableQueue = list.New()
 
-	loop:
 		for {
 			select {
 			case memtable := <-flushMemtableCh:
-				flushQueue.PushBack(memtable)
+				memtableQueue.PushBack(memtable)
+
 			case <-l.closeCh:
-				stop = true
+				memtableQueue.PushBack(l.memtable)
+				err := l.flushMemtable(memtableQueue)
+				if err != nil {
+					panic(err)
+				}
+
+				l.closeAckCh <- struct{}{}
+				return
+
 			default:
-				if flushQueue.Len() == 0 {
-					if stop {
-						break loop
-					}
+				if memtableQueue.Len() == 0 {
 					continue
 				}
 
-				element := flushQueue.Front()
-				memtable, ok := element.Value.(memtable)
-				if !ok {
-					panic("invalid value")
-				}
-
-				segmentFile, err := NewSegmentFile(l.logDirectory, l.segmentFileSize, memtable.startTimeStamp)
+				err := l.flushMemtable(memtableQueue)
 				if err != nil {
 					panic(err)
 				}
-
-				l.segmentFilesLock.Lock()
-				l.segmentFiles[segmentFile.name] = segmentFile
-				l.segmentFilesLock.Unlock()
-
-				segmentFileWriter := segmentFile.Writer()
-				if err != nil {
-					panic(err)
-				}
-
-				err = memtable.flush(segmentFileWriter)
-				if err != nil {
-					panic(err)
-				}
-
-				err = segmentFile.Close()
-				if err != nil {
-					panic(err)
-				}
-
-				flushQueue.Remove(flushQueue.Front())
 			}
 		}
 
-		l.closeCh <- struct{}{}
 	}()
 
 	return flushMemtableCh
 }
 
-// Close closes the file writer by flushing the uncommitted logs if any
-func (l *logWriter) Close() error {
-	l.closeCh <- struct{}{}
-	<-l.closeCh
+func (l *logWriter) flushMemtable(memtableQueue *list.List) error {
+	if memtableQueue.Len() == 0 {
+		return nil
+	}
+
+	element := memtableQueue.Front()
+	memtable, ok := element.Value.(memtable.Memtable)
+	if !ok {
+		return fmt.Errorf("invalid memtable value")
+	}
+
+	segmentFile, err := segmentfile.New(l.logDirectory, memtable.StartTimeStamp, l.segmentFileSize)
+	if err != nil {
+		return errors.Wrap(err, "error creating new segment file")
+	}
+
+	l.segmentFilesLock.Lock()
+	l.segmentFiles[segmentFile.Name] = segmentFile
+	l.segmentFilesLock.Unlock()
+
+	segmentFileWriter := segmentFile.Writer()
+	err = memtable.Flush(segmentFileWriter)
+	if err != nil {
+		return errors.Wrap(err, "error flushing memtable")
+	}
+
+	err = segmentFile.Close()
+	if err != nil {
+		return errors.Wrap(err, "error closing segment file")
+	}
+
+	memtableQueue.Remove(memtableQueue.Front())
+
 	return nil
 }
 
-// Replay replays the logs from the given timestamp ...
-func (l *logWriter) Replay() error {
-	// TODO: Incomplete
+// Close closes the file writer by flushing the uncommitted logs if any
+func (l *logWriter) Close() error {
+	l.closeCh <- struct{}{}
+	<-l.closeAckCh
+	return nil
+}
 
+// Replay replays the logs from the given timestamp
+func (l *logWriter) Replay() error {
 	l.segmentFilesLock.RLock()
 	for segmentFileName, _ := range l.segmentFiles {
 		f, err := os.Open(path.Join(l.logDirectory, segmentFileName))
@@ -152,7 +187,6 @@ func (l *logWriter) Replay() error {
 			return err
 		}
 		defer f.Close()
-		fmt.Println("segmentFile", segmentFileName)
 
 		fileScanner := bufio.NewScanner(f)
 		fileScanner.Split(bufio.ScanLines)

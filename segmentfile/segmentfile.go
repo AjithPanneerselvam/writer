@@ -1,4 +1,4 @@
-package writer
+package segmentfile
 
 import (
 	"io"
@@ -7,8 +7,8 @@ import (
 	"strconv"
 )
 
-type segmentFile struct {
-	name           string
+type SegmentFile struct {
+	Name           string
 	startTimeStamp int64
 	endTimeStamp   int64
 	logDirectory   string
@@ -17,7 +17,7 @@ type segmentFile struct {
 	out            io.ReadWriteCloser
 }
 
-func NewSegmentFile(logDirectory string, size int, startTimeStamp int64) (*segmentFile, error) {
+func New(logDirectory string, startTimeStamp int64, size int) (*SegmentFile, error) {
 	segmentFileName := strconv.FormatInt(startTimeStamp, 10)
 	segmentFilePath := path.Join(logDirectory, segmentFileName)
 
@@ -26,8 +26,8 @@ func NewSegmentFile(logDirectory string, size int, startTimeStamp int64) (*segme
 		return nil, err
 	}
 
-	return &segmentFile{
-		name:           segmentFileName,
+	return &SegmentFile{
+		Name:           segmentFileName,
 		logDirectory:   logDirectory,
 		size:           size,
 		startTimeStamp: startTimeStamp,
@@ -35,14 +35,14 @@ func NewSegmentFile(logDirectory string, size int, startTimeStamp int64) (*segme
 	}, nil
 }
 
-func (s *segmentFile) Writer() io.Writer {
+func (s *SegmentFile) Writer() io.Writer {
 	return s.out
 }
 
-func (s *segmentFile) Reader() io.Reader {
+func (s *SegmentFile) Reader() io.Reader {
 	return s.out
 }
 
-func (s *segmentFile) Close() error {
+func (s *SegmentFile) Close() error {
 	return s.out.Close()
 }
