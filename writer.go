@@ -24,6 +24,10 @@ type Writer interface {
 	//SetLogLevel sets the given logLevel
 	SetLogLevel(logLevel log.LogLevel)
 
+	//SetLogTimeFormat overrides the logTimeFormat
+	// default logTimeFormat is Local Time
+	SetLogTimeFormat(logTimeFormat log.LogTimeFormat)
+
 	Replay() error
 
 	// Close closes flushes the running memtable
@@ -33,10 +37,9 @@ type Writer interface {
 
 // logWriter implements the Writer interface
 type logWriter struct {
-	logDirectory string
-	logLevel     log.LogLevel
-
-	fileIndex fileIndex
+	logDirectory  string
+	logLevel      log.LogLevel
+	logTimeFormat log.LogTimeFormat
 
 	memtable     memtable.Memtable
 	memtableSize int
@@ -45,7 +48,7 @@ type logWriter struct {
 	segmentFiles    map[string]*segmentfile.SegmentFile
 
 	segmentFilesLock sync.RWMutex
-	logLevelLock     sync.Mutex
+	exclusiveLock    sync.Mutex
 
 	flushMemtableCh chan<- memtable.Memtable
 	closeCh         chan struct{}
@@ -57,6 +60,7 @@ func New(logDirectory string, memtableSize int, segmentFileSize int) Writer {
 	logWriter := &logWriter{
 		logDirectory:    logDirectory,
 		logLevel:        log.LogLevelInfo,
+		logTimeFormat:   log.LogTimeFormatLocalTime,
 		memtable:        memtable.New(memtableSize),
 		memtableSize:    memtableSize,
 		segmentFileSize: segmentFileSize,
@@ -77,8 +81,9 @@ func (l *logWriter) Write(r io.Reader) (int, error) {
 		return 0, err
 	}
 
-	log := log.New(logMessage, l.logLevel)
-	logLength := log.Size()
+	log := log.New(logMessage, l.logLevel, l.logTimeFormat)
+	logInBytes := log.Format()
+	logLength := len(logInBytes)
 
 	if l.memtable.OccupiedSize+logLength > l.memtableSize {
 		l.flushMemtableCh <- l.memtable
@@ -90,11 +95,18 @@ func (l *logWriter) Write(r io.Reader) (int, error) {
 	return log.Size(), nil
 }
 
-// SetLogLevel sets the log level for the writer
+// SetLogLevel sets the log level writer the writer
 func (l *logWriter) SetLogLevel(logLevel log.LogLevel) {
-	l.logLevelLock.Lock()
+	l.exclusiveLock.Lock()
 	l.logLevel = logLevel
-	l.logLevelLock.Unlock()
+	l.exclusiveLock.Unlock()
+}
+
+// SetLogTimeFormat sets the logTimeFormat of the writer
+func (l *logWriter) SetLogTimeFormat(logTimeFormat log.LogTimeFormat) {
+	l.exclusiveLock.Lock()
+	l.logTimeFormat = logTimeFormat
+	l.exclusiveLock.Unlock()
 }
 
 func (l *logWriter) flushMemtables() chan<- memtable.Memtable {

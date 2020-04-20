@@ -16,19 +16,28 @@ const (
 	LogLevelFatal LogLevel = "fatal"
 )
 
+type LogTimeFormat string
+
+const (
+	LogTimeFormatLocalTime LogTimeFormat = "[Jan 2 2006 15:04:05]"
+	LogTimeFormatUTC       LogTimeFormat = "[2006-01-02T15:04:05Z]"
+)
+
 // Message is an abstraction of log message
 type Log struct {
-	TimeStamp time.Time
-	LogLevel  LogLevel
-	Message   []byte
+	TimeStamp       time.Time
+	Level           LogLevel
+	TimestampFormat LogTimeFormat
+	Message         []byte
 }
 
 // New wraps the message with log formatted message
-func New(msg []byte, logLevel LogLevel) *Log {
+func New(msg []byte, logLevel LogLevel, timestampFormat LogTimeFormat) *Log {
 	return &Log{
-		TimeStamp: time.Now(),
-		LogLevel:  logLevel,
-		Message:   msg,
+		TimeStamp:       time.Now(),
+		Level:           logLevel,
+		TimestampFormat: timestampFormat,
+		Message:         msg,
 	}
 }
 
@@ -36,12 +45,12 @@ func New(msg []byte, logLevel LogLevel) *Log {
 func (l *Log) Format() []byte {
 	logInBytes := new(bytes.Buffer)
 
-	timestamp := []byte(l.TimeStamp.Format("Jan 2 2006 15:04:05"))
+	timestamp := []byte(l.TimeStamp.Format(string(l.TimestampFormat)))
 
 	logInBytes.Write(timestamp)
 	logInBytes.Write([]byte(string(' ')))
 
-	logInBytes.Write([]byte(l.LogLevel))
+	logInBytes.Write([]byte(l.Level))
 	logInBytes.Write([]byte(string(' ')))
 
 	logInBytes.Write(l.Message)
