@@ -90,7 +90,7 @@ func (l *logWriter) Write(r io.Reader) (int, error) {
 		l.memtable = memtable.New(l.memtableSize)
 	}
 
-	l.memtable.Append(*log)
+	l.memtable.Append(logInBytes, log.TimeStamp)
 
 	return log.Size(), nil
 }
