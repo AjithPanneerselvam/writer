@@ -10,6 +10,7 @@ import (
 	"path"
 	"sync"
 
+	"github.com/AjithPanneerselvam/writer/compactor"
 	"github.com/AjithPanneerselvam/writer/log"
 	"github.com/AjithPanneerselvam/writer/memtable"
 	"github.com/AjithPanneerselvam/writer/segmentfile"
@@ -51,6 +52,7 @@ type logWriter struct {
 	exclusiveLock    sync.Mutex
 
 	flushMemtableCh chan<- memtable.Memtable
+	compactionCh    chan segmentfile.SegmentFile
 	closeCh         chan struct{}
 	closeAckCh      chan struct{}
 }
@@ -58,18 +60,24 @@ type logWriter struct {
 // New returns a new instance of writer
 func New(logDirectory string, memtableSize int, segmentFileSize int) Writer {
 	logWriter := &logWriter{
-		logDirectory:    logDirectory,
-		logLevel:        log.LogLevelInfo,
-		logTimeFormat:   log.LogTimeFormatLocalTime,
-		memtable:        memtable.New(memtableSize),
-		memtableSize:    memtableSize,
+		logDirectory:  logDirectory,
+		logLevel:      log.LogLevelInfo,
+		logTimeFormat: log.LogTimeFormatLocalTime,
+
+		memtable:     memtable.New(memtableSize),
+		memtableSize: memtableSize,
+
 		segmentFileSize: segmentFileSize,
 		segmentFiles:    make(map[string]*segmentfile.SegmentFile, 0),
-		closeCh:         make(chan struct{}),
-		closeAckCh:      make(chan struct{}),
+
+		compactionCh: make(chan segmentfile.SegmentFile),
+		closeCh:      make(chan struct{}),
+		closeAckCh:   make(chan struct{}),
 	}
 
 	logWriter.flushMemtableCh = logWriter.flushMemtables()
+
+	go compactor.New().Listen(logWriter.compactionCh)
 
 	return logWriter
 }
@@ -90,7 +98,7 @@ func (l *logWriter) Write(r io.Reader) (int, error) {
 		l.memtable = memtable.New(l.memtableSize)
 	}
 
-	l.memtable.Append(logInBytes, log.TimeStamp)
+	l.memtable.Append(logInBytes, log.Timestamp)
 
 	return log.Size(), nil
 }
@@ -167,16 +175,12 @@ func (l *logWriter) flushMemtable(memtableQueue *list.List) error {
 	l.segmentFiles[segmentFile.Name] = segmentFile
 	l.segmentFilesLock.Unlock()
 
-	segmentFileWriter := segmentFile.Writer()
-	err = memtable.Flush(segmentFileWriter)
+	err = memtable.Flush(segmentFile.Writer())
 	if err != nil {
 		return errors.Wrap(err, "error flushing memtable")
 	}
 
-	err = segmentFile.Close()
-	if err != nil {
-		return errors.Wrap(err, "error closing segment file")
-	}
+	l.compactionCh <- *segmentFile
 
 	memtableQueue.Remove(memtableQueue.Front())
 
@@ -193,6 +197,7 @@ func (l *logWriter) Close() error {
 // Replay replays the logs from the given timestamp
 func (l *logWriter) Replay() error {
 	l.segmentFilesLock.RLock()
+
 	for segmentFileName, _ := range l.segmentFiles {
 		f, err := os.Open(path.Join(l.logDirectory, segmentFileName))
 		if err != nil {
@@ -200,13 +205,25 @@ func (l *logWriter) Replay() error {
 		}
 		defer f.Close()
 
-		fileScanner := bufio.NewScanner(f)
-		fileScanner.Split(bufio.ScanLines)
+		lineReader := bufio.NewReader(f)
+		for {
+			b, err := lineReader.ReadBytes('\n')
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+			}
 
-		for fileScanner.Scan() {
-			fmt.Println(fileScanner.Text())
+			var log = new(log.Log)
+			err = log.UnmarshalLogLine(b)
+			if err != nil {
+				return errors.Wrap(err, "error unmarshalling log line")
+			}
+
+			fmt.Println(log.String())
 		}
 	}
+
 	l.segmentFilesLock.RUnlock()
 
 	return nil
