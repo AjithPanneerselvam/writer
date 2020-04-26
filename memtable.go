@@ -1,4 +1,4 @@
-package memtable
+package writer
 
 import (
 	"bytes"
@@ -13,8 +13,8 @@ type Memtable struct {
 	TotalSize      int
 }
 
-// New returns a new instance of Memtable
-func New(totalSize int) Memtable {
+// NewMemtable returns a new instance of Memtable
+func NewMemtable(totalSize int) Memtable {
 	return Memtable{
 		OccupiedSize: 0,
 		TotalSize:    totalSize,
@@ -30,7 +30,7 @@ func (m *Memtable) Append(log []byte, timestamp time.Time) error {
 	}
 
 	m.Logs.Write(log)
-	m.Logs.WriteByte('\n')
+	m.Logs.WriteByte(NewLine)
 
 	// +1 for new line
 	m.OccupiedSize += len(log) + 1

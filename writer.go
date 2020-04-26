@@ -10,10 +10,6 @@ import (
 	"path"
 	"sync"
 
-	"github.com/AjithPanneerselvam/writer/compactor"
-	"github.com/AjithPanneerselvam/writer/log"
-	"github.com/AjithPanneerselvam/writer/memtable"
-	"github.com/AjithPanneerselvam/writer/segmentfile"
 	"github.com/pkg/errors"
 )
 
@@ -23,11 +19,11 @@ type Writer interface {
 	Write(r io.Reader) (n int, err error)
 
 	//SetLogLevel sets the given logLevel
-	SetLogLevel(logLevel log.LogLevel)
+	SetLogLevel(logLevel LogLevel)
 
 	//SetLogTimeFormat overrides the logTimeFormat
 	// default logTimeFormat is Local Time
-	SetLogTimeFormat(logTimeFormat log.LogTimeFormat)
+	SetLogTimeFormat(logTimeFormat LogTimeFormat)
 
 	Replay() error
 
@@ -39,45 +35,54 @@ type Writer interface {
 // logWriter implements the Writer interface
 type logWriter struct {
 	logDirectory  string
-	logLevel      log.LogLevel
-	logTimeFormat log.LogTimeFormat
+	logLevel      LogLevel
+	logTimeFormat LogTimeFormat
 
-	memtable     memtable.Memtable
+	memtable     Memtable
 	memtableSize int
 
 	segmentFileSize int
-	segmentFiles    map[string]*segmentfile.SegmentFile
+	segmentFiles    map[string]*SegmentFile
+
+	indexer Indexer
 
 	segmentFilesLock sync.RWMutex
 	exclusiveLock    sync.Mutex
 
-	flushMemtableCh chan<- memtable.Memtable
-	compactionCh    chan segmentfile.SegmentFile
+	flushMemtableCh chan<- Memtable
+	compactionCh    chan SegmentFile
 	closeCh         chan struct{}
 	closeAckCh      chan struct{}
 }
 
 // New returns a new instance of writer
 func New(logDirectory string, memtableSize int, segmentFileSize int) Writer {
+	indexer, err := NewIndexer(logDirectory)
+	if err != nil {
+		panic(fmt.Sprintf("error loading index: %v", err.Error()))
+	}
+
 	logWriter := &logWriter{
 		logDirectory:  logDirectory,
-		logLevel:      log.LogLevelInfo,
-		logTimeFormat: log.LogTimeFormatLocalTime,
+		logLevel:      LogLevelInfo,
+		logTimeFormat: LogTimeFormatLocalTime,
 
-		memtable:     memtable.New(memtableSize),
+		memtable:     NewMemtable(memtableSize),
 		memtableSize: memtableSize,
 
-		segmentFileSize: segmentFileSize,
-		segmentFiles:    make(map[string]*segmentfile.SegmentFile, 0),
+		indexer: indexer,
 
-		compactionCh: make(chan segmentfile.SegmentFile),
+		segmentFileSize: segmentFileSize,
+		segmentFiles:    make(map[string]*SegmentFile, 0),
+
+		compactionCh: make(chan SegmentFile),
 		closeCh:      make(chan struct{}),
 		closeAckCh:   make(chan struct{}),
 	}
 
 	logWriter.flushMemtableCh = logWriter.flushMemtables()
 
-	go compactor.New().Listen(logWriter.compactionCh)
+	go NewCompactor(indexer).Listen(logWriter.compactionCh)
 
 	return logWriter
 }
@@ -89,13 +94,13 @@ func (l *logWriter) Write(r io.Reader) (int, error) {
 		return 0, err
 	}
 
-	log := log.New(logMessage, l.logLevel, l.logTimeFormat)
+	log := NewLog(logMessage, l.logLevel, l.logTimeFormat)
 	logInBytes := log.Format()
 	logLength := len(logInBytes)
 
 	if l.memtable.OccupiedSize+logLength > l.memtableSize {
 		l.flushMemtableCh <- l.memtable
-		l.memtable = memtable.New(l.memtableSize)
+		l.memtable = NewMemtable(l.memtableSize)
 	}
 
 	l.memtable.Append(logInBytes, log.Timestamp)
@@ -104,21 +109,21 @@ func (l *logWriter) Write(r io.Reader) (int, error) {
 }
 
 // SetLogLevel sets the log level writer the writer
-func (l *logWriter) SetLogLevel(logLevel log.LogLevel) {
+func (l *logWriter) SetLogLevel(logLevel LogLevel) {
 	l.exclusiveLock.Lock()
 	l.logLevel = logLevel
 	l.exclusiveLock.Unlock()
 }
 
 // SetLogTimeFormat sets the logTimeFormat of the writer
-func (l *logWriter) SetLogTimeFormat(logTimeFormat log.LogTimeFormat) {
+func (l *logWriter) SetLogTimeFormat(logTimeFormat LogTimeFormat) {
 	l.exclusiveLock.Lock()
 	l.logTimeFormat = logTimeFormat
 	l.exclusiveLock.Unlock()
 }
 
-func (l *logWriter) flushMemtables() chan<- memtable.Memtable {
-	var flushMemtableCh = make(chan memtable.Memtable)
+func (l *logWriter) flushMemtables() chan<- Memtable {
+	var flushMemtableCh = make(chan Memtable)
 
 	go func() {
 		var memtableQueue = list.New()
@@ -161,12 +166,12 @@ func (l *logWriter) flushMemtable(memtableQueue *list.List) error {
 	}
 
 	element := memtableQueue.Front()
-	memtable, ok := element.Value.(memtable.Memtable)
+	memtable, ok := element.Value.(Memtable)
 	if !ok {
 		return fmt.Errorf("invalid memtable value")
 	}
 
-	segmentFile, err := segmentfile.New(l.logDirectory, memtable.StartTimeStamp, l.segmentFileSize)
+	segmentFile, err := NewSegmentFile(l.logDirectory, memtable.StartTimeStamp, l.segmentFileSize)
 	if err != nil {
 		return errors.Wrap(err, "error creating new segment file")
 	}
@@ -179,6 +184,7 @@ func (l *logWriter) flushMemtable(memtableQueue *list.List) error {
 	if err != nil {
 		return errors.Wrap(err, "error flushing memtable")
 	}
+	segmentFile.OccupiedSize += memtable.OccupiedSize
 
 	l.compactionCh <- *segmentFile
 
@@ -214,13 +220,11 @@ func (l *logWriter) Replay() error {
 				}
 			}
 
-			var log = new(log.Log)
-			err = log.UnmarshalLogLine(b)
+			var log = new(Log)
+			err = log.Unmarshal(b)
 			if err != nil {
 				return errors.Wrap(err, "error unmarshalling log line")
 			}
-
-			fmt.Println(log.String())
 		}
 	}
 

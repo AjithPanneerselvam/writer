@@ -4,7 +4,6 @@ import (
 	"strings"
 
 	"github.com/AjithPanneerselvam/writer"
-	"github.com/AjithPanneerselvam/writer/log"
 )
 
 func main() {
@@ -19,11 +18,11 @@ func main() {
 
 	for i := 0; i < 50; i++ {
 		if i%2 == 1 {
-			w.SetLogLevel(log.LogLevelDebug)
-			w.SetLogTimeFormat(log.LogTimeFormatLocalTime)
+			w.SetLogLevel(writer.LogLevelDebug)
+			w.SetLogTimeFormat(writer.LogTimeFormatLocalTime)
 		} else {
-			w.SetLogLevel(log.LogLevelInfo)
-			w.SetLogTimeFormat(log.LogTimeFormatUTC)
+			w.SetLogLevel(writer.LogLevelInfo)
+			w.SetLogTimeFormat(writer.LogTimeFormatUTC)
 		}
 
 		for _, log := range logs {

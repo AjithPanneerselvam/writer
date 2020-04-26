@@ -1,4 +1,4 @@
-package log
+package writer
 
 import (
 	"bytes"
@@ -26,6 +26,10 @@ const (
 	LogTimeFormatUTC       LogTimeFormat = "[2006-01-02T15:04:05Z]"
 )
 
+const (
+	NewLine byte = '\n'
+)
+
 // Message is an abstraction of log message
 type Log struct {
 	Timestamp       time.Time
@@ -34,8 +38,8 @@ type Log struct {
 	Message         []byte
 }
 
-// New wraps the message with log formatted message
-func New(msg []byte, logLevel LogLevel, timestampFormat LogTimeFormat) *Log {
+// NewLog wraps the message with log formatted message
+func NewLog(msg []byte, logLevel LogLevel, timestampFormat LogTimeFormat) *Log {
 	return &Log{
 		Timestamp:       time.Now(),
 		Level:           logLevel,
@@ -66,8 +70,8 @@ func (l *Log) Size() int {
 	return len(l.Format())
 }
 
-// UnmarshalLogLine unmarshalls the byte slice into Log
-func (l *Log) UnmarshalLogLine(b []byte) error {
+// Unmarshal unmarshalls the byte slice into Log
+func (l *Log) Unmarshal(b []byte) error {
 	re := regexp.MustCompile(`(\[.+\])\s(.+)\s(.+)`)
 	logLine := re.FindStringSubmatch(string(b))
 	if len(logLine) != 4 {
